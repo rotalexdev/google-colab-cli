@@ -1,0 +1,120 @@
+name: Build Binary
+
+on:
+  workflow_dispatch:
+  workflow_call:
+
+jobs:
+  build:
+    name: Build on ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            binary_name: colab-cli
+            asset_name: colab-cli-linux-amd64
+          - os: ubuntu-24.04-arm
+            binary_name: colab-cli
+            asset_name: colab-cli-linux-arm64
+          - os: windows-latest
+            binary_name: colab-cli.exe
+            asset_name: colab-cli-windows-amd64.exe
+          - os: macos-latest
+            binary_name: colab-cli
+            asset_name: colab-cli-macos-amd64
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          # MANDATORY. [tool.hatch.version] uses source = "vcs", so hatch-vcs
+          # derives the version from git tags. The checkout action's default
+          # fetch-depth of 1 fetches no tags, and the build dies in hatchling.
+          fetch-depth: 0
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+
+      - name: Set up Python
+        run: uv python install 3.12
+
+      - name: Install dependencies
+        run: |
+          # --no-editable is NOT redundant. Do not "simplify" it away.
+          #
+          # README.md and SKILL.md do NOT exist under src/colab_cli/ in the
+          # source tree. They only exist inside a built wheel, injected by
+          # [tool.hatch.build.targets.wheel.force-include]. An editable
+          # install would point PyInstaller at src/colab_cli, where those two
+          # files are absent, and `colab readme` / `colab skill` would fail at
+          # runtime with "[colab] README.md content not available." on stderr.
+          #
+          # --no-editable makes hatchling materialize the wheel and copy
+          # README.md / SKILL.md into site-packages/colab_cli/ *before*
+          # PyInstaller analyzes the INSTALLED package.
+          #
+          # This is also why there is no --paths src here (the sibling
+          # colab-mcp workflow needs it; this repo must not have it).
+          #
+          # `pip install .` is NOT a valid substitute: jupyter-kernel-client is
+          # git-sourced via [tool.uv.sources], which pip ignores.
+          uv sync --frozen --no-editable
+
+      - name: Create launcher script
+        shell: bash
+        run: |
+          cat > launcher.py <<'EOF'
+          from colab_cli.cli import main
+          if __name__ == '__main__':
+              main()
+          EOF
+
+      - name: Build binary with PyInstaller
+        shell: bash
+        run: |
+          # --with, not `uv pip install pyinstaller`. PyInstaller is
+          # deliberately not a project dependency (it is not in
+          # pyproject.toml or uv.lock), and `uv run` re-syncs the project
+          # environment by default -- which uninstalls anything not in the
+          # lockfile, so an out-of-band `uv pip install pyinstaller` would be
+          # pruned before the command executes. `--with` layers pyinstaller
+          # into an ephemeral overlay env instead, leaving the project env,
+          # pyproject.toml and uv.lock untouched.
+          #
+          # Deliberately NOT passed, and deliberately not to be added without
+          # evidence from a real failure:
+          #   --upx        : a no-op on Linux/macOS ("UPX is available but is
+          #                   disabled on non-Windows due to known
+          #                   compatibility problems") but ACTIVELY applied on
+          #                   Windows. Pure risk.
+          #   --strip      : shrinks the binary at the cost of debuggability.
+          #   --paths src  : wrong for this repo, see the step above.
+          # If CI surfaces another missing package, add exactly one flag for
+          # the error it reports -- do not speculatively pad this list.
+          uv run --with pyinstaller pyinstaller --onefile \
+            --name ${{ matrix.binary_name }} \
+            --collect-data colab_cli \
+            --copy-metadata google-colab-cli \
+            --collect-all jupyter_kernel_client \
+            --collect-all jupyter_client \
+            --collect-all jupyter_mimetypes \
+            --collect-all nbformat \
+            --collect-all rpds_py \
+            --collect-all pyzmq \
+            launcher.py
+
+      - name: Smoke test binary
+        shell: bash
+        run: |
+          # A green PyInstaller build is NOT evidence of a working binary.
+          # This step executes the artifact and asserts on real stdout.
+          uv run python .github/smoke_test.py "dist/${{ matrix.binary_name }}"
+
+      - name: Upload binary as artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.asset_name }}
+          path: dist/${{ matrix.binary_name }}
+          if-no-files-found: error
