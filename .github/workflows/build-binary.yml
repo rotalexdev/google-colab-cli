@@ -8,6 +8,19 @@ jobs:
   build:
     name: Build on ${{ matrix.os }}
     runs-on: ${{ matrix.os }}
+    env:
+      # Windows consoles default to a legacy code page (charmap/cp1252).
+      # skills/colab-operator/SKILL.md contains U+2192 (->), which
+      # `colab skill` echoes through typer.echo, so the binary dies with
+      # "UnicodeEncodeError: 'charmap' codec can't encode character" on
+      # Windows. Python UTF-8 mode makes stdout encoding deterministic
+      # regardless of the console code page.
+      #
+      # KNOWN LIMITATION: this only fixes the artifact when the variable is
+      # set. An end user running the Windows binary from cmd.exe WITHOUT it
+      # still hits the same crash. Upstream states Windows is unsupported
+      # (README.md line 10). See odd/tasks/standalone-binaries.md.
+      PYTHONUTF8: "1"
     strategy:
       fail-fast: false
       matrix:
