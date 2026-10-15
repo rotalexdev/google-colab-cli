@@ -108,6 +108,7 @@ jobs:
           # the error it reports -- do not speculatively pad this list.
           uv run --with pyinstaller pyinstaller --onefile \
             --name ${{ matrix.binary_name }} \
+            --runtime-hook .github/utf8_runtime_hook.py \
             --collect-data colab_cli \
             --copy-metadata google-colab-cli \
             --collect-all jupyter_kernel_client \
